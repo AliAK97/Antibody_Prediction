@@ -1,302 +1,197 @@
-class Structure_Metric_Calculator:
+class PredictionEvaluator:
     def __init__(self, verbose=True):
         self.verbose = verbose
-        self.parser = MMCIFParser(QUIET = not verbose)
-        
-        
-    def load_structure(self, cif_path):
-        structure = self.parser.get_structure("main", cif_path)
-        
-        if self.verbose:
-            print(f"Loaded structures successfully")
-        return structure
-
-    
-    def rename_chains_from_dict(self, structure, chain_id_mapping):
-        renamed_chains = []
-        
-        for model in structure:
-            for chain in model:
-                old_id = chain.id
-                
-                if old_id in chain_id_mapping:
-                    new_id = chain_id_mapping[old_id]
-                    chain.id = new_id
-                    renamed_chains.append((old_id, new_id))
-                    
-                    if self.verbose:
-                        print(f"Renamed chain {old_id} to {new_id}")
-        
-        if self.verbose:
-            if renamed_chains:
-                print(f"Summary of renamed chains:")
-                for old_id, new_id in renamed_chains:
-                    print(f"  {old_id} → {new_id}")
-            else:
-                print("No chains were renamed. Check if your chain IDs match those in the structure.")
-                
-        #io = PDBIO()
-        #io.set_structure(structure)
-        #io.save('/Users/ali/Desktop/Reincke_Lab/Antigen_Prediction/AF3/comparison_pipeline/processed.pdb')           
-        return structure  
-    
-    
-    def renumber_ag_chain_main(self, structure, diff_num):
-        for model in structure:
-            for chain in model:
-                if chain.id == "A":
-                    residues = list(chain)
-
-                    for residue in residues:
-                        old_res_num = residue.id[1]
-                        new_res_num = old_res_num - diff_num
-                        
-                        new_id = (residue.id[0], new_res_num, residue.id[2])
-                        residue.id = new_id
-                 
-        #io = PDBIO()
-        #io.set_structure(structure)
-        #io.save('/Users/ali/Desktop/Reincke_Lab/Antigen_Prediction/AF3/comparison_pipeline/processed.pdb')           
-        return structure  
-    
-    
-    def trim_main_pdb_chains(self, structure, heavy_chain_id, light_chain_id):
-    # this function is used to remove extra chains from the main pdb file
-        for model in structure:
-            for chain in list(model):
-                if chain.id != heavy_chain_id and chain.id != light_chain_id:
-                    model.detach_child(chain.id)
-                    
-        return structure
-    
-    
-    def trim_ag_chains(self, structure, ag_chain_id):
-    # this function is used to remove extra chains from the main pdb file
-        for model in structure:
-            for chain in list(model):
-                if chain.id != ag_chain_id:
-                    model.detach_child(chain.id)        
-
-        return structure
-    
-    def extract_residue_map(self, structure):
-        residue_map = {}
-
-        for model in structure:
-            for chain in model:
-                for residue in chain:
-                    hetfield, resseq, insertion = residue.id
-                    if hetfield != ' ': 
-                        continue
-                    key = (chain.id, resseq, insertion)
-                    residue_map[key] = residue.resname
-
-        return residue_map
-    
-    def cut_structure_in_place(self, structure, shared_keys):
-        for model in structure:
-            for chain in model:
-                residues_to_delete = []
-                for residue in chain:
-                    hetfield, resseq, insertion = residue.id
-                    key = (chain.id, resseq, insertion)
-                    if hetfield != ' ' or key not in shared_keys:
-                        residues_to_delete.append(residue.id)
-                for res_id in residues_to_delete:
-                    del chain[res_id]   
-        #io = PDBIO()
-        #io.set_structure(structure)
-        #io.save('/Users/ali/Desktop/Reincke_Lab/Antigen_Prediction/AF3/comparison_pipeline/processed.pdb')                    
-        return structure
-        
-
-
-    def align_residues(self, structure_main, structure_pred, chain_ids=None):
-        super_imposer = Superimposer()
-
-        main_model = structure_main[0]
-        pred_model = structure_pred[0]
-
-        main_atoms = []
-        pred_atoms = []
-
-        for chain_id in main_model:
-            if (chain_ids is None) or (chain_id.id in chain_ids):
-                if chain_id.id not in pred_model:
-                    continue
-                main_chain = chain_id
-                pred_chain = pred_model[chain_id.id]
-
-                for main_res, pred_res in zip(main_chain, pred_chain):
-                    if main_res.has_id("CA") and pred_res.has_id("CA"):
-                        main_atoms.append(main_res["CA"])
-                        pred_atoms.append(pred_res["CA"])
-
-        if len(main_atoms) != len(pred_atoms):
-            raise ValueError("Mismatch in number of atoms selected for superposition.")
-
-        super_imposer.set_atoms(main_atoms, pred_atoms)
-        super_imposer.apply(structure_pred.get_atoms())
-
-        return structure_pred
-
+        self.cif_parser = MMCIFParser(QUIET = not verbose)
+        self.pdb_parser = PDBParser(QUIET = not verbose)
+        self.csv_reader = pd.read_csv
        
-    def calculate_metrics(self, structure_main, structure_pred, heavy_chain_id=None, light_chain_id=None, ag_chain_id=None):
-    
-        def get_ca_coords(structure, chain_id=None):
-            coords = []
-            residue_ids = []
-            
-            for model in structure:
-                for chain in model:
-                    if chain_id is not None and chain.id != chain_id:
-                        continue
-                        
-                    for residue in chain:
-                        coords.append(residue["CA"].get_coord())
-                        residue_ids.append((chain.id, residue.id[1]))
-            
-            return np.array(coords), residue_ids
         
-        def calc_rmsd(coords1, coords2):
-            diff = coords1 - coords2
-            return np.sqrt((diff * diff).sum() / len(coords1))
-        
-        def calc_gdt_ts(coords1, coords2):
-            if len(coords1) != len(coords2):
-                print(f"Warning: Different number of atoms: {len(coords1)} vs {len(coords2)}")
-                return None
-                
-            distances = np.sqrt(np.sum((coords1 - coords2) ** 2, axis=1))
-            
-            p1 = np.mean(distances <= 1.0) * 100
-            p2 = np.mean(distances <= 2.0) * 100
-            p4 = np.mean(distances <= 4.0) * 100
-            p8 = np.mean(distances <= 8.0) * 100
-            
-            gdt_ts = (p1 + p2 + p4 + p8) / 4.0
-            
-            return gdt_ts
-        
-        def calc_lddt(coords1, coords2, cutoff=15.0, threshold_values=[0.5, 1.0, 2.0, 4.0]):
-            if len(coords1) != len(coords2):
-                print(f"Warning: Different number of atoms: {len(coords1)} vs {len(coords2)}")
-                return None
-                
-            n_atoms = len(coords1)
-                
-            distances_ref = np.zeros((n_atoms, n_atoms))
-            for i in range(n_atoms):
-                for j in range(i+1, n_atoms):
-                    dist = np.linalg.norm(coords1[i] - coords1[j])
-                    distances_ref[i, j] = distances_ref[j, i] = dist
-            
-            distances_model = np.zeros((n_atoms, n_atoms))
-            for i in range(n_atoms):
-                for j in range(i+1, n_atoms):
-                    dist = np.linalg.norm(coords2[i] - coords2[j])
-                    distances_model[i, j] = distances_model[j, i] = dist
-            
-            preserved_fractions = []
-            for threshold in threshold_values:
-                preserved_pairs = 0
-                total_pairs = 0
-                
-                for i in range(n_atoms):
-                    for j in range(i+1, n_atoms):
-                        ref_dist = distances_ref[i, j]
-                        if ref_dist < cutoff:
-                            total_pairs += 1
-                            model_dist = distances_model[i, j]
-                            if abs(ref_dist - model_dist) <= threshold:
-                                preserved_pairs += 1
-                
-                if total_pairs > 0:
-                    preserved_fractions.append(preserved_pairs / total_pairs)
-                else:
-                    preserved_fractions.append(0.0)
-            
-            lddt = np.mean(preserved_fractions) * 100
-            
-            return lddt
-        
-        
-        coords_main_all, res_ids_main_all = get_ca_coords(structure_main)
-        coords_pred_all, res_ids_pred_all = get_ca_coords(structure_pred)
-        
-        if len(coords_main_all) != len(coords_pred_all):
+    def read_csv_file(self, pdb_id, csv_path):
+        pdb_id = pdb_id.upper()
+        df = self.csv_reader(csv_path)
+        heavy_chain_id = df.loc[df['pdb_id'] == pdb_id, 'heavy_chain'].values[0]
+        heavy_chain_seq = df.loc[df['pdb_id'] == pdb_id, 'heavy_chain_seq'].values[0]
+        light_chain_id = df.loc[df['pdb_id'] == pdb_id, 'light_chain'].values[0]
+        light_chain_seq = df.loc[df['pdb_id'] == pdb_id, 'light_chain_seq'].values[0]
+        antigen_id = df.loc[df['pdb_id'] == pdb_id, 'antigen_chain'].values[0]
+        antigen_seq = df.loc[df['pdb_id'] == pdb_id, 'antigen_chain_seq'].values[0]
+        chain_index = heavy_chain_id + light_chain_id + antigen_id        
+        return heavy_chain_id, light_chain_id, antigen_id, chain_index, heavy_chain_seq, light_chain_seq, antigen_seq
+
+
+    def load_structure(self, path):
+        if path.endswith('.pdb'):
+            structure = self.pdb_parser.get_structure("main", path)
             if self.verbose:
-                print(f"Warning: Structures have different number of atoms: {len(coords_main_all)} vs {len(coords_pred_all)}")
+                print(f"Loaded pdb structure from {path} successfully")
+                
+        else:
+            structure = self.cif_parser.get_structure("pred", path) 
+            if self.verbose:
+                print(f"Loaded cif structure from {path} successfully")
+        return structure
+
+
+    def extract_chain_sequence(self, structure, chain_id):
+        chain = structure[0][chain_id]
+        ppb = PPBuilder()
+        sequence = ""
+        for pp in ppb.build_peptides(chain):
+            sequence += str(pp.get_sequence())
+        return sequence
+
+
+    def align_sequences(self, seq1, seq2):
+        aligner = Align.PairwiseAligner()
+        aligner.match = 5
+        aligner.mismatch = 0
+        aligner.open_gap_score = -4
+        aligner.extend_gap_score = -0.5
+        return aligner.align(seq1, seq2)[0]
+
+
+    def get_matching_atoms(self, aln, model_chain, native_chain):
+        model_residues = list(model_chain.get_residues())
+        native_residues = list(native_chain.get_residues())
+
+        model_atoms = []
+        native_atoms = []
+
+        model_aligned = aln.aligned[0]
+        native_aligned = aln.aligned[1]
+
+        for (m_start, m_end), (n_start, n_end) in zip(model_aligned, native_aligned):
+            for mi, ni in zip(range(m_start, m_end), range(n_start, n_end)):
+                if mi < len(model_residues) and ni < len(native_residues):
+                    m_res = model_residues[mi]
+                    n_res = native_residues[ni]
+                    if 'CA' in m_res and 'CA' in n_res:
+                        model_atoms.append(m_res['CA'])
+                        native_atoms.append(n_res['CA'])
+
+        return model_atoms, native_atoms
+
+
+    def get_coords_from_atoms(self, atom_list):
+        coords = [atom.get_coord() for atom in atom_list]
+        return np.array(coords)
+
+
+    def calc_rmsd(self, coords1, coords2):
+        diff = coords1 - coords2
+        return np.sqrt((diff * diff).sum() / len(coords1))
+
+
+    def calc_gdt_ts(self, coords1, coords2):
+        if len(coords1) != len(coords2):
             return None
-        
- 
+        distances = np.sqrt(np.sum((coords1 - coords2) ** 2, axis=1))
+        p1 = np.mean(distances <= 1.0) * 100
+        p2 = np.mean(distances <= 2.0) * 100
+        p4 = np.mean(distances <= 4.0) * 100
+        p8 = np.mean(distances <= 8.0) * 100
+        return (p1 + p2 + p4 + p8) / 4.0
+
+
+    def calc_lddt(self, coords1, coords2, cutoff=15.0, threshold_values=[0.5, 1.0, 2.0, 4.0]):
+        if len(coords1) != len(coords2):
+            return None
+
+        n_atoms = len(coords1)
+
+        dist_ref = np.linalg.norm(coords1[:, None, :] - coords1[None, :, :], axis=-1)
+        dist_pred = np.linalg.norm(coords2[:, None, :] - coords2[None, :, :], axis=-1)
+
+        preserved = []
+        for t in threshold_values:
+            mask = (dist_ref < cutoff)
+            diff = np.abs(dist_ref - dist_pred)
+            preserved_pairs = np.sum((diff <= t) & mask) - n_atoms
+            total_pairs = np.sum(mask) - n_atoms
+            preserved.append(preserved_pairs / total_pairs if total_pairs > 0 else 0.0)
+
+        return np.mean(preserved) * 100
+
+
+    def calculate_metrics(self, native_structure, model_structure, target_chains, heavy_chain_id=None, light_chain_id=None, ag_chain_id=None, verbose=False):
+
+        model_chains = {chain.id for chain in model_structure[0]}
+        native_chains = {chain.id for chain in native_structure[0]}
+        common_chains = model_chains & native_chains
+
+        target_chains = set(target_chains)
+
         results = {
             "overall": {},
             "heavy_chain": {},
             "light_chain": {},
             "antigen_chain": {}
         }
-        
-        results["overall"]["rmsd"] = calc_rmsd(coords_main_all, coords_pred_all)
-        results["overall"]["gdt_ts"] = calc_gdt_ts(coords_main_all, coords_pred_all)
-        results["overall"]["lddt"] = calc_lddt(coords_main_all, coords_pred_all)
-        
-        if heavy_chain_id:
-            coords_main_heavy, _ = get_ca_coords(structure_main, heavy_chain_id)
-            coords_pred_heavy, _ = get_ca_coords(structure_pred, heavy_chain_id)
-            
-            if len(coords_main_heavy) == len(coords_pred_heavy):
-                results["heavy_chain"]["rmsd"] = calc_rmsd(coords_main_heavy, coords_pred_heavy)
-                results["heavy_chain"]["gdt_ts"] = calc_gdt_ts(coords_main_heavy, coords_pred_heavy)
-                results["heavy_chain"]["lddt"] = calc_lddt(coords_main_heavy, coords_pred_heavy)
 
-        
-        if light_chain_id:
-            coords_main_light, _ = get_ca_coords(structure_main, light_chain_id)
-            coords_pred_light, _ = get_ca_coords(structure_pred, light_chain_id)
-            
-            if len(coords_main_light) == len(coords_pred_light):
-                results["light_chain"]["rmsd"] = calc_rmsd(coords_main_light, coords_pred_light)
-                results["light_chain"]["gdt_ts"] = calc_gdt_ts(coords_main_light, coords_pred_light)
-                results["light_chain"]["lddt"] = calc_lddt(coords_main_light, coords_pred_light)
-        
-        if ag_chain_id:
-            coords_main_ag, _ = get_ca_coords(structure_main, ag_chain_id)
-            coords_pred_ag, _ = get_ca_coords(structure_pred, ag_chain_id)
-            
-            if len(coords_main_ag) == len(coords_pred_ag):
-                results["antigen_chain"]["rmsd"] = calc_rmsd(coords_main_ag, coords_pred_ag)
-                results["antigen_chain"]["gdt_ts"] = calc_gdt_ts(coords_main_ag, coords_pred_ag)
-                results["antigen_chain"]["lddt"] = calc_lddt(coords_main_ag, coords_pred_ag)
+        all_model_atoms = []
+        all_native_atoms = []
+        super_model_atoms = []
+        super_native_atoms = []
+        per_chain_data = {}
 
-        
-        if self.verbose:
-            print("\n===== Structure Comparison Metrics =====")
+        for chain_id in common_chains:
+            model_seq = self.extract_chain_sequence(model_structure, chain_id)
+            native_seq = self.extract_chain_sequence(native_structure, chain_id)
 
+            aln = self.align_sequences(model_seq, native_seq)
+            model_chain = model_structure[0][chain_id]
+            native_chain = native_structure[0][chain_id]
+
+            model_atoms, native_atoms = self.get_matching_atoms(aln, model_chain, native_chain)
+
+            if not model_atoms:
+                continue
+
+            all_model_atoms.extend(model_atoms)
+            all_native_atoms.extend(native_atoms)
+
+            if chain_id in target_chains:
+                super_model_atoms.extend(model_atoms)
+                super_native_atoms.extend(native_atoms)
+
+            per_chain_data[chain_id] = (model_atoms, native_atoms)
+        
+        sup = Superimposer()
+        sup.set_atoms(super_native_atoms, super_model_atoms)
+        sup.apply(model_structure.get_atoms())
+
+        coords_model_all = self.get_coords_from_atoms(all_model_atoms)
+        coords_native_all = self.get_coords_from_atoms(all_native_atoms)
+
+        results["overall"]["rmsd"] = self.calc_rmsd(coords_native_all, coords_model_all)
+        results["overall"]["gdt_ts"] = self.calc_gdt_ts(coords_native_all, coords_model_all)
+        results["overall"]["lddt"] = self.calc_lddt(coords_native_all, coords_model_all)
+
+        for label, cid in [("heavy_chain", heavy_chain_id), ("light_chain", light_chain_id), ("antigen_chain", ag_chain_id)]:
+            if cid and cid in per_chain_data:
+                model_atoms, native_atoms = per_chain_data[cid]
+                coords_model = self.get_coords_from_atoms(model_atoms)
+                coords_native = self.get_coords_from_atoms(native_atoms)
+
+                results[label]["rmsd"] = self.calc_rmsd(coords_native, coords_model)
+                results[label]["gdt_ts"] = self.calc_gdt_ts(coords_native, coords_model)
+                results[label]["lddt"] = self.calc_lddt(coords_native, coords_model)
+
+        if verbose:
             print("\nOverall Structure Metrics:")
             print(f"RMSD: {results['overall']['rmsd']:.3f} Å")
             print(f"GDT_TS: {results['overall']['gdt_ts']:.2f}%")
             print(f"LDDT: {results['overall']['lddt']:.2f}%")
-    
-            if heavy_chain_id and "rmsd" in results["heavy_chain"]:
-                print(f"\nHeavy Chain ({heavy_chain_id}) Metrics:")
-                print(f"RMSD: {results['heavy_chain']['rmsd']:.3f} Å")
-                print(f"GDT_TS: {results['heavy_chain']['gdt_ts']:.2f}%")
-                print(f"LDDT: {results['heavy_chain']['lddt']:.2f}%")
-            
-            if light_chain_id and "rmsd" in results["light_chain"]:
-                print(f"\nLight Chain ({light_chain_id}) Metrics:")
-                print(f"RMSD: {results['light_chain']['rmsd']:.3f} Å")
-                print(f"GDT_TS: {results['light_chain']['gdt_ts']:.2f}%")
-                print(f"LDDT: {results['light_chain']['lddt']:.2f}%")
-                
-            if ag_chain_id and "rmsd" in results["antigen_chain"]:
-                print(f"\nAntigen Chain ({ag_chain_id}) Metrics:")
-                print(f"RMSD: {results['antigen_chain']['rmsd']:.3f} Å")
-                print(f"GDT_TS: {results['antigen_chain']['gdt_ts']:.2f}%")
-                print(f"LDDT: {results['antigen_chain']['lddt']:.2f}%")
-        
+
+            for label, cid in [("heavy_chain", heavy_chain_id), ("light_chain", light_chain_id), ("antigen_chain", ag_chain_id)]:
+                if cid and "rmsd" in results[label]:
+                    print(f"\n{label.replace('_', ' ').title()} ({cid}) Metrics:")
+                    print(f"RMSD: {results[label]['rmsd']:.3f} Å")
+                    print(f"GDT_TS: {results[label]['gdt_ts']:.2f}%")
+                    print(f"LDDT: {results[label]['lddt']:.2f}%")
+        print(results)
         return results
+    
 
     def plot_grouped_metrics(self, results):
         metrics = ["rmsd", "lddt", "gdt_ts"]
@@ -321,7 +216,7 @@ class Structure_Metric_Calculator:
 
         chain_order = ["overall", "heavy_chain", "light_chain", "antigen_chain"]
 
-        fig, axes = plt.subplots(3, 1, figsize=(20, 15), sharey=False)
+        fig, axes = plt.subplots(3, 1, figsize=(100, 75), sharey=False)
         for i, metric in enumerate(metrics):
             ax = axes[i]
             sub_df = df[df["Metric"] == metric]
@@ -343,4 +238,5 @@ class Structure_Metric_Calculator:
         plt.show()
         
         return df
+
     
