@@ -192,6 +192,25 @@ class PredictionEvaluator:
         print(results)
         return results
     
+    
+    def final_dataframe_maker(self, df, dataset_name):
+        rows = []
+        
+        for sample_name, group in df.groupby("Sample"):
+            group = group.copy()
+            group['filename'] = sample_name
+            group["column_name"] = dataset_name + "_" + group["Metric"] + "_" + group["Chain"]
+
+            wide = group.pivot(index="Sample", columns="column_name", values="Value")
+            wide.columns.name = None
+            wide = wide.reset_index()
+            rows.append(wide)
+            
+        final_df = pd.concat(rows, ignore_index=True)
+        final_df.insert(0, 'structure', final_df['Sample'].str[:4]) 
+        
+        return final_df
+    
 
     def plot_grouped_metrics(self, results):
         metrics = ["rmsd", "lddt", "gdt_ts"]
@@ -238,5 +257,78 @@ class PredictionEvaluator:
         plt.show()
         
         return df
-
     
+    
+    def dockq_calculator(self, sample_name, pred_structure_path, main_structure_path, heavy_chain_id, light_chain_id, antigen_id):
+        chain_map = {heavy_chain_id: heavy_chain_id, light_chain_id: light_chain_id, antigen_id: antigen_id}
+        native = load_PDB(main_structure_path)
+        pred = load_PDB(pred_structure_path)
+
+        comparison_results_dic, total_dockq = run_on_all_native_interfaces(pred, native, chain_map=chain_map)
+        dockq_row = {}
+        for interface in [''.join(sorted(str(antigen_id) + str(heavy_chain_id))), 
+                          ''.join(sorted(str(antigen_id) + str(light_chain_id))), 
+                          ''.join(sorted(str(heavy_chain_id) + str(light_chain_id)))]:
+            dockq_row[f"{interface}_dockq"] = comparison_results_dic.get(interface, {}).get("DockQ", None)
+
+        dockq_row["Sample"] = sample_name
+        dockq_row["overall_dockq"] = total_dockq/3
+        return dockq_row
+    
+
+    def parse_metrics_json(self, json_path, antigen_id, heavy_id, light_id):
+        full_results = {}
+        for file in os.listdir(json_path):
+            if file.endswith(".json"):
+                full_file_path = os.path.join(json_path, file)
+                sample_name = os.path.splitext(file)[0]
+                with open(full_file_path, 'r') as f:
+                    data = json.load(f)
+
+                chain_ids = [antigen_id, heavy_id, light_id]
+                sorted_chain_ids = sorted(chain_ids)
+                chain_index_map = {chain: idx for idx, chain in enumerate(sorted_chain_ids)}
+
+                role_map = {antigen_id: "antigen", heavy_id: "heavy", light_id: "light"}
+                index_to_role = {chain_index_map[c]: role_map[c] for c in chain_ids}
+
+                result = {}
+
+                for i, val in enumerate(data["chain_ptm"]):
+                    role = index_to_role[i]
+                    result[f"{role}_ptm"] = val
+
+                for i, val in enumerate(data["chain_iptm"]):
+                    role = index_to_role[i]
+                    result[f"{role}_iptm"] = val
+
+                for i in range(3):
+                    for j in range(3):
+                        role_i = index_to_role[i]
+                        role_j = index_to_role[j]
+                        val = data["chain_pair_iptm"][i][j]
+
+                        if i == j:
+                            result[f"{role_i}_pair_iptm"] = val
+                        else:
+                            pair_name = "_".join(sorted([role_i, role_j]))
+                            result[f"{pair_name}_pair_iptm"] = val
+
+                for i in range(3):
+                    for j in range(3):
+                        role_i = index_to_role[i]
+                        role_j = index_to_role[j]
+                        val = data["chain_pair_pae_min"][i][j]
+
+                        if i == j:
+                            result[f"{role_i}_pair_pae_min"] = val
+                        else:
+                            pair_name = "_".join(sorted([role_i, role_j]))
+                            result[f"{pair_name}_pair_pae_min"] = val
+                
+                result["iptm"] = data["iptm"]
+                result["ptm"] = data["ptm"]
+                result["ranking_score"] = data["ranking_score"]
+                result["Sample"] = sample_name
+            full_results[sample_name] = result
+        return pd.DataFrame.from_dict(full_results, orient="index").reset_index()
